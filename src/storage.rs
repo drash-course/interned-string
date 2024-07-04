@@ -2,7 +2,9 @@ use core::fmt;
 use std::{
     borrow::Borrow,
     collections::HashMap,
+    mem::ManuallyDrop,
     ops::Deref,
+    pin::Pin,
     sync::{atomic::{AtomicU32, Ordering}, Mutex}
 };
 use left_right::{Absorb, ReadHandle, WriteHandle};
@@ -13,9 +15,8 @@ use crate::IString;
 
 pub(crate) type IStringKey = u32;
 
-#[derive(Debug)]
 enum StringStorageOp {
-    Insert { key: IStringKey, string: BoxedStr },
+    Insert { key: IStringKey, string: BoxStr },
     Retain { key: IStringKey },
     Release { key: IStringKey }
 }
@@ -39,7 +40,7 @@ impl ConcurrentStringStorage {
 
     #[inline]
     pub(crate) fn insert_or_retain(&self, string: String) -> IStringKey {
-        let boxed: BoxedStr = string.into();
+        let boxed: BoxStr = string.into();
         let found_key: Option<IStringKey> = THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
             let storage = reader.read_handle.enter().expect("reader is available");
             return storage.trie.get(&boxed).copied();
@@ -56,7 +57,7 @@ impl ConcurrentStringStorage {
     }
 
     #[inline]
-    fn insert(&self, string: BoxedStr) -> IStringKey {
+    fn insert(&self, string: BoxStr) -> IStringKey {
         let key = self.next_key.fetch_add(1, Ordering::SeqCst);
         let mut writer = self.write_handle.lock().unwrap();
         writer.append(StringStorageOp::Insert { key, string });
@@ -102,9 +103,9 @@ impl ThreadLocalReader {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct StoredString {
-    pub(crate) inner: BoxedStr,
+    pub(crate) inner: BoxStr,
     strong_count: usize
 }
 
@@ -113,7 +114,7 @@ enum StoredStringReleaseResult {
 }
 
 impl StoredString {
-    fn new(string: BoxedStr) -> Self {
+    fn new(string: BoxStr) -> Self {
         Self { inner: string, strong_count: 1 }
     }
 
@@ -135,107 +136,74 @@ impl StoredString {
 
 /// A wrapper type around a `Box<str>` that provides facilities to
 /// unsafely clone it with pointer aliasing to save memory.
-#[derive(Debug, Eq)]
-pub(crate) struct BoxedStr {
-    // `*const` because the pointer won't change after a BoxedStr is created
-    contents: *const str
+#[derive(Eq, PartialEq, Clone)]
+pub(crate) struct BoxStr {
+    // Since the `*mut str` can be aliased via `clone_with_aliasing()`, it needs to be
+    // ManuallyDrop<_> to avoid a double free, e.g. on panic.
+    contents: ManuallyDrop<Pin<Box<str>>>
 }
 
-impl BoxedStr {
-    fn clone_with_aliasing(&mut self) -> Self {
-        // Creates a new BoxedStr by aliasing the str contents.
-        // Dropping the new BoxedStr does not free() the contents, so there is no implicit double free.
+impl BoxStr {
+    unsafe fn clone_with_aliasing(&mut self) -> Self {
+        let aliased_box = Box::from_raw((self.contents.as_bytes_mut() as *mut [u8]) as *mut str);
         Self {
-            // copy the fat pointer
-            contents: self.contents,
+            contents: ManuallyDrop::new(Pin::new(aliased_box))
         }
     }
 
-    // PRE: All of the aliasing clones of `self` have been dropped.
     unsafe fn free(self) {
-        // Safety:
-        // (1) We know `self.contents` points to a valid str (by the invariant of BoxedStr),
-        //     and we have ownership of self, thus exclusive access, so casting to a *mut str is fine.
-        // (2) We know the ptr was created via Box::into_raw(), and it was not free'd yet (by precondition),
-        //     so it's OK to re-create a Box<str> from the raw ptr.
-        let box_str: Box<str> = Box::from_raw(self.contents as *mut str);
-        // dropping the box will free() the ptr.
-        drop(box_str);
+        drop(ManuallyDrop::into_inner(self.contents));
     }
 
     unsafe fn get<'a>(&self) -> &'a str {
-        // Safety:
-        // this method extends the lifetime of `slice` from &'x self to an arbitrary 'a that the caller chooses.
+        let slice: &str = self.contents.deref();
+        // Safety: this extends the lifetime of `slice` from 'self (the lifetime of the borrowed self)
+        // to an arbitrary 'a that the caller chooses.
         // This is unsafe because the caller must manually choose a lifetime that actually does not
-        // exceed the lifetime of the owned self.
-        // Note that 'a does _not_ need to not outlast 'x, because the content is *const
-        // so the pointer won't change for the lifetime of self, thus the returned
-        // value merely needs to not outlast the owned self.
-        std::mem::transmute(self.contents)
+        // exceed the lifetime of the `BoxStr`.
+        // Note that 'a does _not_ need to not outlast 'self, because the BoxStr contents is Pin,
+        // so the pointer in the Box won't change for the lifetime of BoxStr, thus the returned
+        // value merely needs to not outlast the contents.
+        std::mem::transmute(slice)
     }
 }
 
-impl Clone for BoxedStr {
-    fn clone(&self) -> Self {
-        self.deref().to_string().into()
-    }
-}
-
-impl Deref for BoxedStr {
+impl Deref for BoxStr {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.contents }
+        self.contents.deref()
     }
 }
 
-impl fmt::Display for BoxedStr {
+impl fmt::Display for BoxStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.deref())
+        f.write_str(&self.contents)
     }
 }
 
-impl From<String> for BoxedStr {
+impl From<String> for BoxStr {
     fn from(value: String) -> Self {
-        let ptr = Box::into_raw(value.into_boxed_str());
-        Self { contents: ptr }
+        Self { contents: ManuallyDrop::new(Pin::new(value.into_boxed_str())) }
     }
 }
 
 #[cfg(test)]
-impl From<&str> for BoxedStr {
+impl From<&str> for BoxStr {
     fn from(value: &str) -> Self {
-        Self::from(String::from(value))
+        Self { contents: ManuallyDrop::new(Pin::new(String::from(value).into_boxed_str())) }
     }
 }
 
-impl PartialEq for BoxedStr {
-    fn eq(&self, other: &Self) -> bool {
-        self.deref() == other.deref()
-    }
-}
-
-impl TrieKey for BoxedStr {
+impl TrieKey for BoxStr {
     #[inline]
     fn encode_bytes(&self) -> Vec<u8> {
-        // Safety:
-        // - By the invariant of BoxedStr, `self.contents` points to a valid str, which can be cast to `*const [u8]`
-        // - dereferencing the *const [u8] is OK here because the pointer is valid
-        // - immediately re-borrow the dereferenced [u8], which is safe
-        // Note: this whole expression should optimize into a fat pointer copy (2x usize)
-        let bytes: &[u8] = unsafe { &*(self.contents as *const [u8]) };
-        // create a new vec (will allocate sadly)
-        let vec = Vec::from(bytes);
-        return vec
+        self.contents.encode_bytes()
     }
 }
 
-unsafe impl Send for BoxedStr {}
-unsafe impl Sync for BoxedStr {}
-
-#[derive(Debug)]
 pub(crate) struct InnerStringStorage {
-    pub(crate) trie: Trie<BoxedStr, IStringKey>,
+    pub(crate) trie: Trie<BoxStr, IStringKey>,
     pub(crate) map: HashMap<IStringKey, StoredString>,
 }
 
@@ -255,8 +223,8 @@ impl InnerStringStorage {
         stored_string.retain();
     }
 
-    #[inline]
-    fn release(&mut self, key: IStringKey) -> Option<StoredString> {
+    #[inline] // optimize away the bool
+    fn release(&mut self, key: IStringKey, allowed_to_free_boxstr: bool) {
         let stored_string = self.map.get_mut(&key).unwrap();
         match stored_string.release() {
             StoredStringReleaseResult::IsDroppable => {
@@ -270,11 +238,16 @@ impl InnerStringStorage {
                     removed_key.unwrap() == key,
                     "The string '{}' that was removed from the trie does not match the key", owned_stored_string.inner
                 );
-                return Some(owned_stored_string);
+                if allowed_to_free_boxstr {
+                    // Safety (from caller):
+                    // Since we are in absorb_first, we cant free() the BoxStr contents because
+                    // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
+                    // Dropping __any__ one of the two now would create a dangling pointer in the other.
+                    unsafe { owned_stored_string.inner.free() }
+                }
             },
             StoredStringReleaseResult::IsReferenced => {
                 // do nothing else
-                return None;
             },
         }
     }
@@ -290,8 +263,12 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                     "Inserting a new string '{}' in tree but there is already a key {} for it ", string, previous_key.unwrap()
                 );
 
-                let stored_string_with_aliasing = StoredString::new(string.clone_with_aliasing());
-                // Note: the BoxedStr content is now being aliased from stored_string_with_aliasing (1) and operation (2).
+                // Safety:
+                // The BoxStr contents is now being aliased from stored_string_with_aliasing (1) and operation (2).
+                // Dropping __any__ one of the two now would create a dangling pointer in the other.
+                // This is fine because (1) will be inserted into the map and won't be dropped,
+                // and (2) will be passed into `absorb_second` and won't be dropped until then either.
+                let stored_string_with_aliasing = StoredString::new(unsafe { string.clone_with_aliasing() });
 
                 let previous_stored = self.map.insert(*key, stored_string_with_aliasing);
                 debug_assert!(
@@ -301,9 +278,11 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             },
             StringStorageOp::Retain { key } => self.retain(*key),
             StringStorageOp::Release { key } => {
-                let _stored_string = self.release(*key);
-                // Note: since we are in absorb_first, we cant free() the BoxedStr because its content is
-                // still being pointed to by the other map.
+                // Safety:
+                // Since we are in absorb_first, we cant free() the BoxStr contents because
+                // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
+                // Dropping __any__ one of the two now would create a dangling pointer in the other.
+                self.release(*key, false)
             },
         }
     }
@@ -328,13 +307,11 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             },
             StringStorageOp::Retain { key } => self.retain(key),
             StringStorageOp::Release { key } => {
-                if let Some(stored_string) = self.release(key) {
-                    // Safety:
-                    // Since we are in absorb_second, we can free() the BoxedStr content because it's now uniquely
-                    // pointed to by the write map's StoredString, because absorbed_first already ran for the given
-                    // operation, and dropped the other BoxedStr.
-                    unsafe { stored_string.inner.free() };
-                }
+                // Safety:
+                // Since we are in absorb_second, we can free() the BoxStr contents because it's now uniquely
+                // referenced by the write map's StoredString, because absorbed_first already ran for the given
+                // operation, and must have manually dropped the BoxStr inside the StoredString.
+                self.release(key, true);
             },
         }
     }
