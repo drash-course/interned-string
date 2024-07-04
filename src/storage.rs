@@ -44,7 +44,6 @@ impl ConcurrentStringStorage {
         }
     }
 
-    #[inline]
     pub(crate) fn insert_or_retain(&self, string: String) -> IStringKey {
         let boxed: BoxedStr = string.into();
         let found_key: Option<IStringKey> = THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
@@ -62,7 +61,6 @@ impl ConcurrentStringStorage {
         }
     }
 
-    #[inline]
     fn insert(&self, string: BoxedStr) -> IStringKey {
         let mut writer = self.writer.lock().unwrap();
         let key = writer.next_key;
@@ -74,14 +72,17 @@ impl ConcurrentStringStorage {
         return key;
     }
 
-    #[inline]
     fn retain(&self, key: IStringKey) {
         let mut writer = self.writer.lock().unwrap();
         writer.write_handle.append(StringStorageOp::Retain { key });
         // optimisation: do not publish here
     }
 
-    #[inline]
+    // Not sure if inlining this one is a clear win:
+    // it's used by IString::drop and will potentially be called from a truckload of places
+    // in client code and may cause code bloat without giving much of a perf win because
+    // - it's acquiring a lock, which is expensive anyway
+    // - WriteHandle::append inlines to a bunch of code so Self::release can be quite big
     pub(crate) fn release(&self, istring: &mut IString) {
         let mut writer = self.writer.lock().unwrap();
         writer.write_handle.append(StringStorageOp::Release { key: istring.key });

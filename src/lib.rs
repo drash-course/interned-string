@@ -57,6 +57,7 @@ impl Deref for IString {
 }
 
 impl std::fmt::Display for IString {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self)
     }
@@ -67,6 +68,24 @@ impl Debug for IString {
         f.debug_tuple("IString")
          .field(&self.deref())
          .finish()
+    }
+}
+
+pub trait Intern {
+    fn intern(self) -> IString where Self: Sized;
+}
+
+impl Intern for String {
+    #[inline]
+    fn intern(self) -> IString {
+        IString::from(self)
+    }
+}
+
+impl Intern for &str {
+    #[inline]
+    fn intern(self) -> IString {
+        IString::from(self)
     }
 }
 
@@ -121,7 +140,7 @@ mod tests {
     #[test]
     fn it_creates_and_removes_1_string() {
         with_exclusive_use_of_shared_storage(|| {
-            let my_istring1 = IString::from("hello");
+            let my_istring1 = "hello".intern();
             assert!(my_istring1.deref() == "hello");
 
             assert_string_count_in_storage(1);
@@ -132,7 +151,7 @@ mod tests {
             assert_string_count_in_storage(1);
             assert_string_is_still_stored("hello");
 
-            let my_istring2 = IString::from("another");
+            let my_istring2 = "another".to_string().intern();
             assert!(my_istring2.deref() == "another");
 
             assert_string_count_in_storage(1);
