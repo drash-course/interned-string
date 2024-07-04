@@ -1,6 +1,6 @@
 ## interned-string
 
-This crate exposes `IString`, an immutable and interned string type.
+This crate exposes `IString`, an [immutable and interned string](https://en.wikipedia.org/wiki/String_interning) type.
 
 It's built for high performance and with multithreading in mind.
 
@@ -13,7 +13,7 @@ A radix tree (compact trie) needs to be traversed to deduplicate the new string,
 a lock needs to be acquired, and the tree needs to be updated in case the string wasn't interned yet.
 While the tree walk can be done in parallel from multiple threads, the lock prevents linear scaling for writes.
 
-<!-- GETTING STARTED -->
+
 ## Getting Started
 
 You can intern any `String` or `&str` value by calling `intern()`.
