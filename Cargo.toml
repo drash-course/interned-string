@@ -1,9 +1,10 @@
 [package]
 name = "interned-string"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MPL-2.0"
 description = "High-performance and concurrent string interning for general purpose use."
+repository = "https://github.com/drash-course/interned-string"
 keywords = ["string", "interner", "caching"]
 
 [dependencies]
