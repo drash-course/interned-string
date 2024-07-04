@@ -1,7 +1,9 @@
 [package]
-name = "istring"
+name = "interned-string"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
+description = "High-performance and concurrent string interning for general purpose use."
 
 [dependencies]
 left-right = "0.11.5"

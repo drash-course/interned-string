@@ -1,6 +1,6 @@
 use std::ops::Deref;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use istring::IString;
+use interned_string::IString;
 
 fn a_bigger_bunch(c: &mut Criterion) {
     c.bench_function(
