@@ -284,15 +284,51 @@ mod tests {
     }
 
     #[test]
-    fn test_send() {
+    fn it_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<IString>();
     }
 
     #[test]
-    fn test_sync() {
+    fn it_is_sync() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<IString>();
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn it_serializes() {
+        with_exclusive_use_of_shared_storage(|| {
+            use serde::Serialize;
+
+            #[derive(Serialize)]
+            struct ExampleDTO {
+                favorite_dish: IString
+            }
+
+            let dto = ExampleDTO { favorite_dish: "pasta".intern() };
+
+            assert_eq!(serde_json::to_string(&dto).unwrap(), "{\"favorite_dish\":\"pasta\"}");
+        });
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn it_deserializes() {
+        with_exclusive_use_of_shared_storage(|| {
+            use serde::Deserialize;
+
+            #[derive(Deserialize, PartialEq, Debug)]
+            struct ExampleDTO {
+                favorite_dish: IString
+            }
+
+            let input = "{\"favorite_dish\":\"pasta\"}";
+
+            let dto: Result<ExampleDTO, _> = serde_json::from_str(input);
+
+            assert_eq!(dto.unwrap(), ExampleDTO { favorite_dish: "pasta".into() });
+        });
     }
 
     fn assert_string_count_in_storage(count: usize) {

@@ -248,6 +248,7 @@ dependencies = [
  "once_cell",
  "radix_trie",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
