@@ -1,6 +1,7 @@
 ## interned-string
 
-This crate exposes `IString`, an [immutable and interned string](https://en.wikipedia.org/wiki/String_interning) type.
+This crate exposes `IString`, an 
+[immutable and interned string](https://en.wikipedia.org/wiki/String_interning) type.
 
 It's built for high performance and with multithreading in mind.
 
@@ -10,8 +11,9 @@ It scales linearly with the number of reading threads.
 
 The tradeoff is that creating a new `IString` is slower.
 A radix tree (compact trie) needs to be traversed to deduplicate the new string,
-a lock needs to be acquired, and the tree needs to be updated in case the string wasn't interned yet.
-While the tree walk can be done in parallel from multiple threads, the lock prevents linear scaling for writes.
+a lock needs to be acquired, and the tree needs to be updated if the string wasn't interned yet.
+While the tree walk can be done in parallel from multiple threads, the lock prevents linear 
+scaling for writes.
 
 
 ## Getting Started
@@ -63,6 +65,19 @@ fn main() {
 
 ```
 
+## Planned Improvements
+
+- Make `IString::from` (in the already interned case), `IString::clone`, and `IString::drop`
+  lock free.
+
+- Replace or rewrite the radix tree to make it reuse the string storage, instead of storing a clone
+  of the each interned string.
+  Currently the crate uses 2x the interned string storage space because of this (1x in storage,
+  1x as a clone in the radix tree).
+
+- Free the memory of unused strings in the background / in a cold path. Currenly the memory is
+  only free'd the next time a new string is inserted in storage, which may be unexpected.
+
 ## Contributing
 
 Feel free to open a PR. Any contribution is **greatly appreciated**.
@@ -75,4 +90,5 @@ If you have a suggestion, please open an Issue.
 
 ## Acknowledgments
 
-Special thanks to Jon Gjengset (@jonhoo) for providing the inspiration for this crate, and for his work on `left-right`.
+Special thanks to Jon Gjengset (@jonhoo) for providing the inspiration for this crate, and for his
+work on `left-right`.
