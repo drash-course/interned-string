@@ -5,20 +5,21 @@ mod storage;
 
 /// An immutable and interned string.
 /// 
-/// Reading an `IString`'s contents is very fast, lock free and wait free thanks to the `left_right` crate.
+/// Reading an `IString`'s contents is very fast, lock free and wait free (thanks to `left_right`).
 /// Can be shared and read from any number of threads.
 /// Scales linearly with the number of reading threads.
 /// 
-/// The tradeoff being that creating a new `IString` is much slower.
-/// A radix tree (compact trie) needs to be traversed to deduplicate the string,
-/// a lock needs to be acquired, and the tree needs to be updated in case of a new string.
-/// While the tree walk can be done in parallel from multiple threads,
-/// the lock prevents linear scaling for writes.
-/// 
-/// Dropping an `IString` also acquires a lock.
+/// The tradeoff is that creating a new `IString` is comparatively slower :
+/// - Creating a new `IString` with a string that is already interned is generally fast.
+///   It acquires a global lock.
+/// - Creating a new `IString` with a string that isn't already interned is much slower.
+///   It acquired a global lock and waits for all readers to finish reading.
+#[derive(Eq, PartialEq, Ord, Hash)]
 pub struct IString {
     pub(crate) key: IStringKey
 }
+
+// Indispensable traits impl : From, Drop, Deref
 
 impl From<String> for IString {
     #[inline]
@@ -56,10 +57,44 @@ impl Deref for IString {
     }
 }
 
-impl std::fmt::Display for IString {
+impl AsRef<str> for IString {
     #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self)
+    fn as_ref(&self) -> &str {
+        THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
+            reader.read(self)
+        })
+    }
+}
+
+// Common traits impl that can't be derived : Clone, PartialOrd, Debug, Display, Default
+
+impl Clone for IString {
+    fn clone(&self) -> Self {
+        SHARED_STORAGE.retain(self.key);
+
+        Self { key: self.key }
+    }
+}
+
+impl PartialOrd for IString {
+    fn lt(&self, other: &Self) -> bool {
+        self.deref().lt(other.deref())
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        self.deref().le(other.deref())
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        self.deref().gt(other.deref())
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        self.deref().ge(other.deref())
+    }
+    
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.deref().partial_cmp(other.deref())
     }
 }
 
@@ -70,6 +105,21 @@ impl Debug for IString {
          .finish()
     }
 }
+
+impl std::fmt::Display for IString {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+impl Default for IString {
+    fn default() -> Self {
+        Self::from(String::default())
+    }
+}
+
+// Convenience trait Intern
 
 pub trait Intern {
     fn intern(self) -> IString where Self: Sized;
@@ -231,6 +281,18 @@ mod tests {
             assert_string_is_not_stored("world");
             assert_string_count_in_storage(3);
         });
+    }
+
+    #[test]
+    fn test_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<IString>();
+    }
+
+    #[test]
+    fn test_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<IString>();
     }
 
     fn assert_string_count_in_storage(count: usize) {

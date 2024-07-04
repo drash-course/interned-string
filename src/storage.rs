@@ -72,7 +72,7 @@ impl ConcurrentStringStorage {
         return key;
     }
 
-    fn retain(&self, key: IStringKey) {
+    pub(crate) fn retain(&self, key: IStringKey) {
         let mut writer = self.writer.lock().unwrap();
         writer.write_handle.append(StringStorageOp::Retain { key });
         // optimisation: do not publish here
