@@ -73,26 +73,23 @@ mod tests {
     #[test]
     fn it_creates_and_removes_1_string() {
         with_exclusive_use_of_shared_storage(|| {
-            let my_istring = IString::from("hello");
-            assert!(my_istring.deref() == "hello");
+            let my_istring1 = IString::from("hello");
+            assert!(my_istring1.deref() == "hello");
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring.key).unwrap().inner.deref() == "hello");
-                assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring.key));
-            }
+            assert_string_count_in_storage(1);
+            assert_string_is_stored_with_key("hello", my_istring1.key);
 
-            drop(my_istring);
+            drop(my_istring1);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 0);
-                assert!(read_handle.trie.len() == 0);
-            }
+            assert_string_count_in_storage(1);
+            assert_string_is_still_stored("hello");
+
+            let my_istring2 = IString::from("another");
+            assert!(my_istring2.deref() == "another");
+
+            assert_string_count_in_storage(1);
+            assert_string_is_stored_with_key("another", my_istring2.key);
+            assert_string_is_not_stored("hello")
         });
     }
 
@@ -105,36 +102,18 @@ mod tests {
             assert!(my_istring2.deref() == "hello");
             assert!(my_istring1.key == my_istring2.key);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.deref() == "hello");
-                assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring1.key));
-                assert!(read_handle.trie.get(&"hola".into()) == None);
-            }
+            assert_string_count_in_storage(1);
+            assert_string_is_stored_with_key("hello", my_istring1.key);
 
             drop(my_istring1);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "hello");
-                assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&"hola".into()) == None);
-            }
+            assert_string_count_in_storage(1);
+            assert_string_is_stored_with_key("hello", my_istring2.key);
 
             drop(my_istring2);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 0);
-                assert!(read_handle.trie.len() == 0);
-            }
+            assert_string_count_in_storage(1);
+            assert_string_is_still_stored("hello");
         });
     }
 
@@ -150,46 +129,72 @@ mod tests {
             assert!(my_istring1.key != my_istring2.key);
             assert!(my_istring2.key != my_istring3.key);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 3);
-                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.deref() == "hello");
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "world");
-                assert!(read_handle.map.get(&my_istring3.key).unwrap().inner.deref() == "howdy");
-
-                assert!(read_handle.trie.len() == 3);
-                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring1.key));
-                assert!(read_handle.trie.get(&"world".into()) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&"howdy".into()) == Some(&my_istring3.key));
-                assert!(read_handle.trie.get(&"hola".into()) == None);
-            }
+            assert_string_count_in_storage(3);
+            assert_string_is_stored_with_key("hello", my_istring1.key);
+            assert_string_is_stored_with_key("world", my_istring2.key);
+            assert_string_is_stored_with_key("howdy", my_istring3.key);
+            assert_string_is_not_stored("hola");
 
             drop(my_istring1);
-            drop(my_istring3);
-
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "world");
-
-                assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&"hello".into()) == None);
-                assert!(read_handle.trie.get(&"world".into()) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&"howdy".into()) == None);
-                assert!(read_handle.trie.get(&"hola".into()) == None);
-            }
-
             drop(my_istring2);
 
-            {
-                let guard = SHARED_STORAGE.read_handle.lock().unwrap();
-                let read_handle = guard.enter().unwrap();
-                assert!(read_handle.map.len() == 0);
-                assert!(read_handle.trie.len() == 0);
-            }
+            assert_string_count_in_storage(3);
+            assert_string_is_still_stored("hello");
+            assert_string_is_still_stored("world");
+            assert_string_is_stored_with_key("howdy", my_istring3.key);
+            assert_string_is_not_stored("hola");
+
+            // it should reuse the storage
+            let my_istring1bis = IString::from("hello");
+            assert!(my_istring1bis.deref() == "hello");
+
+            // and not clean up the storage of "world" yet
+            assert_string_count_in_storage(3);
+            assert_string_is_stored_with_key("hello", my_istring1bis.key);
+            assert_string_is_stored_with_key("howdy", my_istring3.key);
+            assert_string_is_still_stored("world");
+
+            let my_istring4 = IString::from("another");
+            assert!(my_istring4.deref() == "another");
+
+            // creating a new string should cause the storage of unused strings to be cleaned up
+            assert_string_is_stored_with_key("hello", my_istring1bis.key);
+            assert_string_is_stored_with_key("howdy", my_istring3.key);
+            assert_string_is_stored_with_key("another", my_istring4.key);
+            assert_string_is_not_stored("world");
+            assert_string_count_in_storage(3);
         });
+    }
+
+    fn assert_string_count_in_storage(count: usize) {
+        let guard = SHARED_STORAGE.read_handle.lock().unwrap();
+        let read_handle = guard.enter().unwrap();
+        assert_eq!(read_handle.map.len(), count);
+        assert_eq!(read_handle.trie.len(), count);
+    }
+
+    fn assert_string_is_still_stored(string: &str) {
+        let guard = SHARED_STORAGE.read_handle.lock().unwrap();
+        let read_handle = guard.enter().unwrap();
+        let key = read_handle.trie.get(&string.into());
+        if let Some(key) = key {
+            assert!(read_handle.map.get(&key).unwrap().inner.deref() == string);
+        } else {
+            assert!(false, "the string is not in the trie");
+        }
+    }
+
+    fn assert_string_is_stored_with_key(string: &str, key: u32) {
+        let guard = SHARED_STORAGE.read_handle.lock().unwrap();
+        let read_handle = guard.enter().unwrap();
+        assert!(read_handle.map.get(&key).unwrap().inner.deref() == string);
+        assert_eq!(read_handle.trie.get(&string.into()), Some(&key));
+    }
+
+    fn assert_string_is_not_stored(string: &str) {
+        let guard = SHARED_STORAGE.read_handle.lock().unwrap();
+        let read_handle = guard.enter().unwrap();
+        assert_eq!(read_handle.trie.get(&string.into()), None);
     }
 
     static SHARED_STORAGE_MUTEX: Mutex<()> = Mutex::new(());

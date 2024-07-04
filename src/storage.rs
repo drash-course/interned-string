@@ -1,6 +1,5 @@
 use core::fmt;
 use std::{
-    borrow::Borrow,
     collections::HashMap,
     mem::MaybeUninit,
     ops::Deref,
@@ -17,7 +16,9 @@ pub(crate) type IStringKey = u32;
 enum StringStorageOp {
     Insert { key: IStringKey, string: BoxedStr },
     Retain { key: IStringKey },
-    Release { key: IStringKey }
+    // Note: releasing a string does not immediately free the storage, you have to run DropUnusedStrings as well.
+    Release { key: IStringKey },
+    DropUnusedStrings,
 }
 
 // Needs to be Sync, so we need to use Mutex
@@ -60,6 +61,7 @@ impl ConcurrentStringStorage {
         let key = self.next_key.fetch_add(1, Ordering::SeqCst);
         let mut writer = self.write_handle.lock().unwrap();
         writer.append(StringStorageOp::Insert { key, string });
+        writer.append(StringStorageOp::DropUnusedStrings);
         writer.publish();
         return key;
     }
@@ -68,14 +70,14 @@ impl ConcurrentStringStorage {
     fn retain(&self, key: IStringKey) {
         let mut writer = self.write_handle.lock().unwrap();
         writer.append(StringStorageOp::Retain { key });
-        writer.publish();
+        // optimisation: do not publish here
     }
 
     #[inline]
     pub(crate) fn release(&self, istring: &mut IString) {
         let mut writer = self.write_handle.lock().unwrap();
         writer.append(StringStorageOp::Release { key: istring.key });
-        writer.publish();
+        // optimisation: do not publish here
     }
 }
 
@@ -108,10 +110,6 @@ pub(crate) struct StoredString {
     strong_count: usize
 }
 
-enum StoredStringReleaseResult {
-    IsDroppable, IsReferenced
-}
-
 impl StoredString {
     fn new(string: BoxedStr) -> Self {
         Self { inner: string, strong_count: 1 }
@@ -122,14 +120,14 @@ impl StoredString {
         self.strong_count += 1;
     }
 
-    #[inline(always)] // to optimize the enum away
-    fn release(&mut self) -> StoredStringReleaseResult {
-        self.strong_count -= 1;
-        if self.strong_count == 0 {
-            return StoredStringReleaseResult::IsDroppable
-        } else {
-            return StoredStringReleaseResult::IsReferenced
-        };
+    #[inline]
+    fn release(&mut self) {
+        self.strong_count = self.strong_count.checked_sub(1).unwrap();
+    }
+
+    #[inline]
+    fn is_droppable(&self) -> bool {
+        self.strong_count == 0
     }
 }
 
@@ -224,6 +222,7 @@ impl TrieKey for BoxedStr {
 pub(crate) struct InnerStringStorage {
     pub(crate) trie: Trie<BoxedStr, IStringKey>,
     pub(crate) map: HashMap<IStringKey, StoredString>,
+    pub(crate) strings_to_possibly_free: Vec<IStringKey>,
 }
 
 impl Default for InnerStringStorage {
@@ -231,6 +230,7 @@ impl Default for InnerStringStorage {
         Self {
             trie: Trie::new(),
             map: HashMap::new(),
+            strings_to_possibly_free: Vec::new()
         }
     }
 }
@@ -242,26 +242,12 @@ impl InnerStringStorage {
         stored_string.retain();
     }
 
-    fn release(&mut self, key: IStringKey) -> Option<BoxedStr> {
+    #[inline]
+    fn release(&mut self, key: IStringKey) {
         let stored_string = self.map.get_mut(&key).unwrap();
-        match stored_string.release() {
-            StoredStringReleaseResult::IsDroppable => {
-                let owned_stored_string = self.map.remove(&key).unwrap();
-                let removed_key = self.trie.remove(owned_stored_string.inner.borrow());
-                debug_assert!(
-                    removed_key.is_some(),
-                    "Removed string '{}' from trie but it was not found", owned_stored_string.inner
-                );
-                debug_assert!(
-                    removed_key.unwrap() == key,
-                    "The string '{}' that was removed from the trie does not match the key", owned_stored_string.inner
-                );
-                return Some(owned_stored_string.inner)
-            },
-            StoredStringReleaseResult::IsReferenced => {
-                // do nothing else
-                return None
-            },
+        stored_string.release();
+        if stored_string.is_droppable() {
+            self.strings_to_possibly_free.push(key);
         }
     }
 }
@@ -285,12 +271,30 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                 );
             },
             StringStorageOp::Retain { key } => self.retain(*key),
-            StringStorageOp::Release { key } => {
+            StringStorageOp::Release { key } => self.release(*key),
+            StringStorageOp::DropUnusedStrings => {
                 // Note:
-                // Since we are in absorb_first, we cant free() the BoxedStr because
-                // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
-                self.release(*key);
-            },
+                // Since we are in absorb_first, we cant free() the unused `BoxedStr`s because
+                // they are still being aliased by the read map's and the write map's `StoredString`s
+                for string_key in self.strings_to_possibly_free.drain(..) {
+                    let stored = self.map.remove(&string_key).unwrap();
+                    // make sure that the string is actually unused
+                    if stored.is_droppable() {
+                        // remove it from the trie as well
+                        let removed_key = self.trie.remove(&stored.inner);
+                        debug_assert!(removed_key == Some(string_key));
+
+                        // Note: we can't free() the BoxedStr here because it's still being aliased
+                        // by the other map. We just drop it, which essentially does a forget()
+                        drop(stored)
+                    } else {
+                        // put the StoredString back in the map.
+                        // we optimise for the "if" branch, so in this "else" branch we do more work: remove + insert.
+                        // otherwise, the "if" branch would have to do get + remove, instead of just remove.
+                        self.map.insert(string_key, stored);
+                    }
+                }
+            }
         }
     }
 
@@ -313,13 +317,27 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                 );
             },
             StringStorageOp::Retain { key } => self.retain(key),
-            StringStorageOp::Release { key } => {
-                if let Some(boxed) = self.release(key) {
-                    // Safety:
-                    // Since we are in absorb_second, we can free() the BoxedStr because it's now uniquely
-                    // referenced by the write map's StoredString, because absorbed_first already ran for the given
-                    // operation, and must have dropped the other BoxedStr.
-                    unsafe { boxed.free() }
+            StringStorageOp::Release { key } => self.release(key),
+            StringStorageOp::DropUnusedStrings => {
+                for string_key in self.strings_to_possibly_free.drain(..) {
+                    let stored = self.map.remove(&string_key).unwrap();
+                    // make sure that the string is actually unused
+                    if stored.is_droppable() {
+                        // remove it from the trie as well
+                        let removed_key = self.trie.remove(&stored.inner);
+                        debug_assert!(removed_key == Some(string_key));
+
+                        // Safety:
+                        // Since we are in absorb_second, we can free() the BoxedStr because it's now uniquely
+                        // referenced by the write map's StoredString, because absorbed_first already ran for the given
+                        // operation, and must have dropped the other BoxedStr.
+                        unsafe { stored.inner.free() };
+                    } else {
+                        // put the StoredString back in the map.
+                        // we optimise for the "if" branch, so in this "else" branch we do more work: remove + insert.
+                        // otherwise, the "if" branch would have to do get + remove, instead of just remove.
+                        self.map.insert(string_key, stored);
+                    }
                 }
             },
         }
