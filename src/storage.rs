@@ -13,7 +13,7 @@ use crate::IString;
 
 pub(crate) type IStringKey = u32;
 
-enum StringStorageOp {
+pub(crate) enum StringStorageOp {
     Insert { key: IStringKey, string: BoxedStr },
     Retain { key: IStringKey },
     // Note: releasing a string does not immediately free the storage, you have to run DropUnusedStrings as well.
@@ -21,14 +21,14 @@ enum StringStorageOp {
     DropUnusedStrings,
 }
 
-struct UniqueWriter {
-    write_handle: WriteHandle<InnerStringStorage, StringStorageOp>,
+pub(crate) struct UniqueWriter {
+    pub(crate) write_handle: WriteHandle<InnerStringStorage, StringStorageOp>,
     next_key: IStringKey,
 }
 
 // Needs to be Sync, so we need to use Mutex
 pub(crate) struct ConcurrentStringStorage {
-    writer: Mutex<UniqueWriter>,
+    pub(crate) writer: Mutex<UniqueWriter>,
     pub(crate) read_handle: Mutex<ReadHandle<InnerStringStorage>>,
 }
 

@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{fmt::Debug, ops::Deref};
 use storage::{IStringKey, ThreadLocalReader, SHARED_STORAGE, THREAD_LOCAL_READER};
 
 mod storage;
@@ -61,6 +61,54 @@ impl std::fmt::Display for IString {
         f.write_str(self)
     }
 }
+
+impl Debug for IString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("IString")
+         .field(&self.deref())
+         .finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+mod feature_serde {
+    use serde::{de::Visitor, Deserialize, Serialize};
+    use crate::IString;
+
+    impl Serialize for IString {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str(std::ops::Deref::deref(&self))
+        }
+    }
+    
+    impl<'de> Deserialize<'de> for IString {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_string(IStringVisitor)
+        }
+    }
+    
+    struct IStringVisitor;
+    
+    impl<'de> Visitor<'de> for IStringVisitor {
+        type Value = IString;
+    
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+    
+        fn visit_string<E: serde::de::Error>(self, string: String) -> Result<Self::Value, E> {
+            // does not need to allocate a new string
+            Ok(IString::from(string))
+        }
+    
+        fn visit_str<E: serde::de::Error>(self, slice: &str) -> Result<Self::Value, E> {
+            // less performant, will allocate
+            Ok(IString::from(slice))
+        }
+    }
+}
+
+// tests
 
 #[cfg(test)]
 mod tests {
@@ -200,8 +248,14 @@ mod tests {
     static SHARED_STORAGE_MUTEX: Mutex<()> = Mutex::new(());
 
     fn with_exclusive_use_of_shared_storage(closure: fn()) {
-        let guard = SHARED_STORAGE_MUTEX.lock();
+        let guard = SHARED_STORAGE_MUTEX.lock().expect("test lock is not poisoned");
         closure();
+
+        // reset the writer for the next test
+        let mut writer = SHARED_STORAGE.writer.lock().unwrap();
+        writer.write_handle.append(storage::StringStorageOp::DropUnusedStrings);
+        writer.write_handle.publish();
+        drop(writer);
         drop(guard);
     }
 }
