@@ -161,13 +161,18 @@ impl BoxedStr {
         unsafe { self.contents.assume_init_ref() }
     }
 
-    unsafe fn clone_with_aliasing(&mut self) -> Self {
+    fn clone_with_aliasing(&mut self) -> Self {
+        // Safety: this is ok because the contents are always init,
+        // and thanks to MaybeUninit<_> the compiler can't assume noalias
+        // so it's fine to copy the box (the fat pointer) to make a new BoxedStr.
         Self {
-            contents: MaybeUninit::new(self.contents.assume_init_read())
+            contents: MaybeUninit::new(unsafe { self.contents.assume_init_read() })
         }
     }
 
     unsafe fn free(self) {
+        // Calling free() on a BoxedStr that is still being aliased will cause a double free.
+        // The caller must make sure that `self` is the last BoxedStr that is sharing (aliasing) the contents.
         let contents = self.contents.assume_init();
         drop(contents);
     }
@@ -237,8 +242,7 @@ impl InnerStringStorage {
         stored_string.retain();
     }
 
-    #[inline] // optimize away the bool
-    fn release(&mut self, key: IStringKey, allowed_to_free_BoxedStr: bool) {
+    fn release(&mut self, key: IStringKey) -> Option<BoxedStr> {
         let stored_string = self.map.get_mut(&key).unwrap();
         match stored_string.release() {
             StoredStringReleaseResult::IsDroppable => {
@@ -252,16 +256,11 @@ impl InnerStringStorage {
                     removed_key.unwrap() == key,
                     "The string '{}' that was removed from the trie does not match the key", owned_stored_string.inner
                 );
-                if allowed_to_free_BoxedStr {
-                    // Safety (from caller):
-                    // Since we are in absorb_first, we cant free() the BoxedStr contents because
-                    // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
-                    // Dropping __any__ one of the two now would create a dangling pointer in the other.
-                    unsafe { owned_stored_string.inner.free() }
-                }
+                return Some(owned_stored_string.inner)
             },
             StoredStringReleaseResult::IsReferenced => {
                 // do nothing else
+                return None
             },
         }
     }
@@ -277,12 +276,7 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                     "Inserting a new string '{}' in tree but there is already a key {} for it ", string, previous_key.unwrap()
                 );
 
-                // Safety:
-                // The BoxedStr contents is now being aliased from stored_string_with_aliasing (1) and operation (2).
-                // Dropping __any__ one of the two now would create a dangling pointer in the other.
-                // This is fine because (1) will be inserted into the map and won't be dropped,
-                // and (2) will be passed into `absorb_second` and won't be dropped until then either.
-                let stored_string_with_aliasing = StoredString::new(unsafe { string.clone_with_aliasing() });
+                let stored_string_with_aliasing = StoredString::new(string.clone_with_aliasing());
 
                 let previous_stored = self.map.insert(*key, stored_string_with_aliasing);
                 debug_assert!(
@@ -292,11 +286,10 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             },
             StringStorageOp::Retain { key } => self.retain(*key),
             StringStorageOp::Release { key } => {
-                // Safety:
-                // Since we are in absorb_first, we cant free() the BoxedStr contents because
+                // Note:
+                // Since we are in absorb_first, we cant free() the BoxedStr because
                 // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
-                // Dropping __any__ one of the two now would create a dangling pointer in the other.
-                self.release(*key, false)
+                self.release(*key);
             },
         }
     }
@@ -321,11 +314,13 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             },
             StringStorageOp::Retain { key } => self.retain(key),
             StringStorageOp::Release { key } => {
-                // Safety:
-                // Since we are in absorb_second, we can free() the BoxedStr contents because it's now uniquely
-                // referenced by the write map's StoredString, because absorbed_first already ran for the given
-                // operation, and must have manually dropped the BoxedStr inside the StoredString.
-                self.release(key, true);
+                if let Some(boxed) = self.release(key) {
+                    // Safety:
+                    // Since we are in absorb_second, we can free() the BoxedStr because it's now uniquely
+                    // referenced by the write map's StoredString, because absorbed_first already ran for the given
+                    // operation, and must have dropped the other BoxedStr.
+                    unsafe { boxed.free() }
+                }
             },
         }
     }
