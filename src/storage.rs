@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     mem::MaybeUninit,
     ops::Deref,
-    sync::{atomic::{AtomicU32, Ordering}, Mutex}
+    sync::Mutex
 };
 use left_right::{Absorb, ReadHandle, WriteHandle};
 use once_cell::sync::Lazy;
@@ -21,20 +21,26 @@ enum StringStorageOp {
     DropUnusedStrings,
 }
 
+struct UniqueWriter {
+    write_handle: WriteHandle<InnerStringStorage, StringStorageOp>,
+    next_key: IStringKey,
+}
+
 // Needs to be Sync, so we need to use Mutex
 pub(crate) struct ConcurrentStringStorage {
-    write_handle: Mutex<WriteHandle<InnerStringStorage, StringStorageOp>>,
+    writer: Mutex<UniqueWriter>,
     pub(crate) read_handle: Mutex<ReadHandle<InnerStringStorage>>,
-    next_key: AtomicU32
 }
 
 impl ConcurrentStringStorage {
     fn new() -> Self {
-        let (write, read) = left_right::new::<InnerStringStorage, StringStorageOp>();
+        let (write_handle, read_handle) = left_right::new::<InnerStringStorage, StringStorageOp>();
         Self {
-            write_handle: Mutex::new(write),
-            read_handle: Mutex::new(read),
-            next_key: 0.into(),
+            writer: Mutex::new(UniqueWriter {
+                write_handle: write_handle,
+                next_key: 0,
+            }),
+            read_handle: Mutex::new(read_handle),
         }
     }
 
@@ -58,25 +64,27 @@ impl ConcurrentStringStorage {
 
     #[inline]
     fn insert(&self, string: BoxedStr) -> IStringKey {
-        let key = self.next_key.fetch_add(1, Ordering::SeqCst);
-        let mut writer = self.write_handle.lock().unwrap();
-        writer.append(StringStorageOp::Insert { key, string });
-        writer.append(StringStorageOp::DropUnusedStrings);
-        writer.publish();
+        let mut writer = self.writer.lock().unwrap();
+        let key = writer.next_key;
+        // TODO: scan the storage for reusable keys when it overflows, instead of panic'ing
+        writer.next_key = writer.next_key.checked_add(1).unwrap();
+        writer.write_handle.append(StringStorageOp::Insert { key, string });
+        writer.write_handle.append(StringStorageOp::DropUnusedStrings);
+        writer.write_handle.publish();
         return key;
     }
 
     #[inline]
     fn retain(&self, key: IStringKey) {
-        let mut writer = self.write_handle.lock().unwrap();
-        writer.append(StringStorageOp::Retain { key });
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_handle.append(StringStorageOp::Retain { key });
         // optimisation: do not publish here
     }
 
     #[inline]
     pub(crate) fn release(&self, istring: &mut IString) {
-        let mut writer = self.write_handle.lock().unwrap();
-        writer.append(StringStorageOp::Release { key: istring.key });
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_handle.append(StringStorageOp::Release { key: istring.key });
         // optimisation: do not publish here
     }
 }
