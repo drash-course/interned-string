@@ -1,5 +1,12 @@
 use core::fmt;
-use std::{borrow::Borrow, collections::HashMap, mem::ManuallyDrop, ops::Deref, sync::{atomic::{AtomicU32, Ordering}, Mutex}};
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    mem::ManuallyDrop,
+    ops::Deref,
+    pin::Pin,
+    sync::{atomic::{AtomicU32, Ordering}, Mutex}
+};
 use left_right::{Absorb, ReadHandle, WriteHandle};
 use once_cell::sync::Lazy;
 use radix_trie::{Trie, TrieKey};
@@ -88,11 +95,11 @@ impl ThreadLocalReader {
     #[inline]
     pub(crate) fn read<'a>(&self, istring: &'a IString) -> &'a str {
         let iss = self.read_handle.enter().expect("reader is available");
-        let boxed = iss.map.get(&istring.key).expect("a valid IString implies that the storage has it's string contents");
+        let stored_string = iss.map.get(&istring.key).expect("a valid IString implies that the storage has it's string contents");
         // Safety: we hold a reference to an IString that lives for 'a
         //         so the IString won't be dropped for at least 'a
         //         so the BoxedString we get from storage must live for at least 'a as well.
-        return unsafe { boxed.get() }
+        return unsafe { stored_string.inner.get() }
     }
 }
 
@@ -111,10 +118,6 @@ impl StoredString {
         Self { inner: string, strong_count: 1 }
     }
 
-    unsafe fn get<'a>(&self) -> &'a str {
-        std::mem::transmute(self.inner.contents.deref())
-    }
-
     #[inline]
     fn retain(&mut self) {
         self.strong_count += 1;
@@ -131,16 +134,45 @@ impl StoredString {
     }
 }
 
+/// A wrapper type around a `Box<str>` that provides facilities to
+/// unsafely clone it with pointer aliasing to save memory.
 #[derive(Eq, PartialEq, Clone)]
 pub(crate) struct BoxStr {
-    pub(crate) contents: Box<str>
+    // Since the `*mut str` can be aliased via `clone_with_aliasing()`, it needs to be
+    // ManuallyDrop<_> to avoid a double free, e.g. on panic.
+    contents: ManuallyDrop<Pin<Box<str>>>
 }
 
 impl BoxStr {
     unsafe fn clone_with_aliasing(&mut self) -> Self {
+        let aliased_box = Box::from_raw((self.contents.as_bytes_mut() as *mut [u8]) as *mut str);
         Self {
-            contents: Box::from_raw((self.contents.as_bytes_mut() as *mut [u8]) as *mut str)
+            contents: ManuallyDrop::new(Pin::new(aliased_box))
         }
+    }
+
+    unsafe fn free(self) {
+        drop(ManuallyDrop::into_inner(self.contents));
+    }
+
+    unsafe fn get<'a>(&self) -> &'a str {
+        let slice: &str = self.contents.deref();
+        // Safety: this extends the lifetime of `slice` from 'self (the lifetime of the borrowed self)
+        // to an arbitrary 'a that the caller chooses.
+        // This is unsafe because the caller must manually choose a lifetime that actually does not
+        // exceed the lifetime of the `BoxStr`.
+        // Note that 'a does _not_ need to not outlast 'self, because the BoxStr contents is Pin,
+        // so the pointer in the Box won't change for the lifetime of BoxStr, thus the returned
+        // value merely needs to not outlast the contents.
+        std::mem::transmute(slice)
+    }
+}
+
+impl Deref for BoxStr {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.contents.deref()
     }
 }
 
@@ -152,7 +184,14 @@ impl fmt::Display for BoxStr {
 
 impl From<String> for BoxStr {
     fn from(value: String) -> Self {
-        Self { contents: value.into_boxed_str() }
+        Self { contents: ManuallyDrop::new(Pin::new(value.into_boxed_str())) }
+    }
+}
+
+#[cfg(test)]
+impl From<&str> for BoxStr {
+    fn from(value: &str) -> Self {
+        Self { contents: ManuallyDrop::new(Pin::new(String::from(value).into_boxed_str())) }
     }
 }
 
@@ -200,11 +239,11 @@ impl InnerStringStorage {
                     "The string '{}' that was removed from the trie does not match the key", owned_stored_string.inner
                 );
                 if allowed_to_free_boxstr {
-                    drop(owned_stored_string);
-                } else {
-                    let owned_box_str = owned_stored_string.inner;
-                    let _ = ManuallyDrop::new(owned_box_str);
-                    // does not free() the ptr :-)
+                    // Safety (from caller):
+                    // Since we are in absorb_first, we cant free() the BoxStr contents because
+                    // it's still being aliased by the read map's StoredString (1) and the write map's StoredString (2).
+                    // Dropping __any__ one of the two now would create a dangling pointer in the other.
+                    unsafe { owned_stored_string.inner.free() }
                 }
             },
             StoredStringReleaseResult::IsReferenced => {

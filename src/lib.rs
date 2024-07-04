@@ -66,7 +66,6 @@ impl std::fmt::Display for IString {
 mod tests {
     use std::{ops::Deref, sync::Mutex};
     use radix_trie::TrieCommon;
-    use storage::BoxStr;
 
     use super::*;
     use crate::storage::SHARED_STORAGE;
@@ -81,9 +80,9 @@ mod tests {
                 let guard = SHARED_STORAGE.read_handle.lock().unwrap();
                 let read_handle = guard.enter().unwrap();
                 assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring.key).unwrap().inner.contents.deref() == "hello");
+                assert!(read_handle.map.get(&my_istring.key).unwrap().inner.deref() == "hello");
                 assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hello".to_string().into_boxed_str() }) == Some(&my_istring.key));
+                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring.key));
             }
 
             drop(my_istring);
@@ -110,10 +109,10 @@ mod tests {
                 let guard = SHARED_STORAGE.read_handle.lock().unwrap();
                 let read_handle = guard.enter().unwrap();
                 assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.contents.deref() == "hello");
+                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.deref() == "hello");
                 assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hello".to_string().into_boxed_str() }) == Some(&my_istring1.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "hola".to_string().into_boxed_str() }) == None);
+                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring1.key));
+                assert!(read_handle.trie.get(&"hola".into()) == None);
             }
 
             drop(my_istring1);
@@ -122,10 +121,10 @@ mod tests {
                 let guard = SHARED_STORAGE.read_handle.lock().unwrap();
                 let read_handle = guard.enter().unwrap();
                 assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.contents.deref() == "hello");
+                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "hello");
                 assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hello".to_string().into_boxed_str() }) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "hola".to_string().into_boxed_str() }) == None);
+                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring2.key));
+                assert!(read_handle.trie.get(&"hola".into()) == None);
             }
 
             drop(my_istring2);
@@ -155,15 +154,15 @@ mod tests {
                 let guard = SHARED_STORAGE.read_handle.lock().unwrap();
                 let read_handle = guard.enter().unwrap();
                 assert!(read_handle.map.len() == 3);
-                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.contents.deref() == "hello");
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.contents.deref() == "world");
-                assert!(read_handle.map.get(&my_istring3.key).unwrap().inner.contents.deref() == "howdy");
+                assert!(read_handle.map.get(&my_istring1.key).unwrap().inner.deref() == "hello");
+                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "world");
+                assert!(read_handle.map.get(&my_istring3.key).unwrap().inner.deref() == "howdy");
 
                 assert!(read_handle.trie.len() == 3);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hello".to_string().into_boxed_str() }) == Some(&my_istring1.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "world".to_string().into_boxed_str() }) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "howdy".to_string().into_boxed_str() }) == Some(&my_istring3.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "hola".to_string().into_boxed_str() }) == None);
+                assert!(read_handle.trie.get(&"hello".into()) == Some(&my_istring1.key));
+                assert!(read_handle.trie.get(&"world".into()) == Some(&my_istring2.key));
+                assert!(read_handle.trie.get(&"howdy".into()) == Some(&my_istring3.key));
+                assert!(read_handle.trie.get(&"hola".into()) == None);
             }
 
             drop(my_istring1);
@@ -173,13 +172,13 @@ mod tests {
                 let guard = SHARED_STORAGE.read_handle.lock().unwrap();
                 let read_handle = guard.enter().unwrap();
                 assert!(read_handle.map.len() == 1);
-                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.contents.deref() == "world");
+                assert!(read_handle.map.get(&my_istring2.key).unwrap().inner.deref() == "world");
 
                 assert!(read_handle.trie.len() == 1);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hello".to_string().into_boxed_str() }) == None);
-                assert!(read_handle.trie.get(&BoxStr { contents: "world".to_string().into_boxed_str() }) == Some(&my_istring2.key));
-                assert!(read_handle.trie.get(&BoxStr { contents: "howdy".to_string().into_boxed_str() }) == None);
-                assert!(read_handle.trie.get(&BoxStr { contents: "hola".to_string().into_boxed_str() }) == None);
+                assert!(read_handle.trie.get(&"hello".into()) == None);
+                assert!(read_handle.trie.get(&"world".into()) == Some(&my_istring2.key));
+                assert!(read_handle.trie.get(&"howdy".into()) == None);
+                assert!(read_handle.trie.get(&"hola".into()) == None);
             }
 
             drop(my_istring2);
