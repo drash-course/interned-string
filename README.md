@@ -5,16 +5,7 @@ This crate exposes `IString`, an
 
 It's built for high performance and with multithreading in mind.
 
-Reading an `IString`'s contents is very fast, lock free and wait free (thanks to `left_right`).
-The `IString` can be shared and read from any number of threads.
-It scales linearly with the number of reading threads.
-
-The tradeoff is that creating a new `IString` is slower.
-A radix tree (compact trie) needs to be traversed to deduplicate the new string,
-a lock needs to be acquired, and the tree needs to be updated if the string wasn't interned yet.
-While the tree walk can be done in parallel from multiple threads, the lock prevents linear 
-scaling for writes.
-
+It provides O(1) `Hash` and `Eq` operations, perfect for your `HashMap<IString, _>`.
 
 ## Getting Started
 
@@ -64,6 +55,18 @@ fn main() {
 }
 
 ```
+
+## Performance Characteristics
+
+Reading an `IString`'s contents is very fast, lock free and wait free (thanks to `left_right`).
+The `IString` can be shared and read from any number of threads.
+It scales linearly with the number of reading threads.
+
+The tradeoff is that creating a new `IString` is slower.
+A radix tree (compact trie) needs to be traversed to deduplicate the new string,
+a lock needs to be acquired, and the tree needs to be updated if the string wasn't interned yet.
+While the tree walk can be done in parallel from multiple threads, the lock prevents linear 
+scaling for writes.
 
 ## Planned Improvements
 
