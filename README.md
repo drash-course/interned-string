@@ -70,9 +70,6 @@ scaling for writes.
 
 ## Planned Improvements
 
-- Make `IString::from` (in the already interned case), `IString::clone`, and `IString::drop`
-  lock free.
-
 - Replace or rewrite the radix tree to make it reuse the string storage, instead of storing a clone
   of the each interned string.
   Currently the crate uses 2x the interned string storage space because of this (1x in storage,

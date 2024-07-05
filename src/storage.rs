@@ -3,57 +3,131 @@ use std::{
     collections::HashMap,
     mem::MaybeUninit,
     ops::Deref,
-    sync::Mutex
+    sync::Mutex,
 };
 use left_right::{Absorb, ReadHandle, WriteHandle};
 use once_cell::sync::Lazy;
 use radix_trie::{Trie, TrieKey};
+use lockfree::channel::{mpsc, RecvErr};
 
 use crate::IString;
 
 pub(crate) type IStringKey = u32;
 
 pub(crate) enum StringStorageOp {
+    /// Insert the string in storage with the given key.
     Insert { key: IStringKey, string: BoxedStr },
+    /// Increment the `strong_count` of the stored string with the given key.
     Retain { key: IStringKey },
-    // Note: releasing a string does not immediately free the storage, you have to run DropUnusedStrings as well.
+    /// Decrement the `strong_count` of the stored string with the given key.
     Release { key: IStringKey },
+    /// Drop (and eventually free) all stored strings that are no longer used.
     DropUnusedStrings,
+}
+
+#[derive(Debug)]
+enum ChannelOp {
+    /// Eventually increment the `strong_count` of the stored string with the given key.
+    Retain { key: IStringKey },
+    /// Eventually decrement the `strong_count` of the stored string with the given key.
+    Release { key: IStringKey },
 }
 
 pub(crate) struct UniqueWriter {
     pub(crate) write_handle: WriteHandle<InnerStringStorage, StringStorageOp>,
     next_key: IStringKey,
+    ops_channel_receiver: mpsc::Receiver<ChannelOp>,
+}
+
+impl UniqueWriter {
+    fn do_pending_ops_and_insert(&mut self, string: BoxedStr) -> IStringKey {
+        // add pending operations
+        self.drain_channel_ops();
+
+        // insert
+        let key = self.next_key;
+        // TODO: scan the storage for reusable keys when it overflows, instead of panic'ing
+        self.next_key = self.next_key.checked_add(1).unwrap();
+        self.write_handle.append(StringStorageOp::Insert { key, string });
+
+        // drop what is unused
+        self.write_handle.append(StringStorageOp::DropUnusedStrings);
+
+        // block until readers are done
+        self.write_handle.publish();
+        return key;
+    }
+
+    pub(crate) fn drain_channel_ops(&mut self) {
+        loop {
+            match self.ops_channel_receiver.recv() {
+                Ok(operation) => {
+                    match operation {
+                        ChannelOp::Retain { key } => {
+                            self.write_handle.append(StringStorageOp::Retain { key })
+                        },
+                        ChannelOp::Release { key } => {
+                            self.write_handle.append(StringStorageOp::Release { key })
+                        },
+                    };
+                }
+                Err(RecvErr::NoMessage) => {
+                    // the channel is empty
+                    return;
+                },
+                Err(RecvErr::NoSender) => {
+                    // the sending threads went away
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn collect_garbage(&mut self) {
+        // add pending operations
+        self.drain_channel_ops();
+        // drop what is unused
+        self.write_handle.append(StringStorageOp::DropUnusedStrings);
+        // block until readers are done
+        self.write_handle.publish();
+    }
 }
 
 // Needs to be Sync, so we need to use Mutex
 pub(crate) struct ConcurrentStringStorage {
     pub(crate) writer: Mutex<UniqueWriter>,
     pub(crate) read_handle: Mutex<ReadHandle<InnerStringStorage>>,
+    ops_channel_sender: mpsc::Sender<ChannelOp>
 }
 
 impl ConcurrentStringStorage {
     fn new() -> Self {
         let (write_handle, read_handle) = left_right::new::<InnerStringStorage, StringStorageOp>();
+        let (sender, receiver) = mpsc::create();
         Self {
             writer: Mutex::new(UniqueWriter {
-                write_handle: write_handle,
+                write_handle,
                 next_key: 0,
+                ops_channel_receiver: receiver,
             }),
             read_handle: Mutex::new(read_handle),
+            ops_channel_sender: sender,
         }
     }
 
     pub(crate) fn insert_or_retain(&self, string: String) -> IStringKey {
         let boxed: BoxedStr = string.into();
-        let found_key: Option<IStringKey> = THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
-            let storage = reader.read_handle.enter().expect("reader is available");
-            return storage.trie.get(&boxed).copied();
+        let found_key: Option<IStringKey> = THREAD_LOCAL_READER.with(|tl_reader: &ThreadLocalReader| {
+            let storage = tl_reader.read_handle.enter().expect("reader is available");
+            if let Some(found_key) = storage.trie.get(&boxed).copied() {
+                tl_reader.retain(found_key);
+                return Some(found_key);
+            }
+            return None;
         });
 
         if let Some(key) = found_key {
             // string is already in storage
-            self.retain(key);
             return key;
         } else {
             // string is not in storage yet
@@ -63,46 +137,36 @@ impl ConcurrentStringStorage {
 
     fn insert(&self, string: BoxedStr) -> IStringKey {
         let mut writer = self.writer.lock().unwrap();
-        let key = writer.next_key;
-        // TODO: scan the storage for reusable keys when it overflows, instead of panic'ing
-        writer.next_key = writer.next_key.checked_add(1).unwrap();
-        writer.write_handle.append(StringStorageOp::Insert { key, string });
-        writer.write_handle.append(StringStorageOp::DropUnusedStrings);
-        writer.write_handle.publish();
-        return key;
-    }
-
-    pub(crate) fn retain(&self, key: IStringKey) {
-        let mut writer = self.writer.lock().unwrap();
-        writer.write_handle.append(StringStorageOp::Retain { key });
-        // optimisation: do not publish here
-    }
-
-    // Not sure if inlining this one is a clear win:
-    // it's used by IString::drop and will potentially be called from a truckload of places
-    // in client code and may cause code bloat without giving much of a perf win because
-    // - it's acquiring a lock, which is expensive anyway
-    // - WriteHandle::append inlines to a bunch of code so Self::release can be quite big
-    pub(crate) fn release(&self, istring: &mut IString) {
-        let mut writer = self.writer.lock().unwrap();
-        writer.write_handle.append(StringStorageOp::Release { key: istring.key });
-        // optimisation: do not publish here
+        return writer.do_pending_ops_and_insert(string);
     }
 }
 
 // does not need to be Sync nor Send :-)
 pub(crate) struct ThreadLocalReader {
-    read_handle: ReadHandle<InnerStringStorage>
+    read_handle: ReadHandle<InnerStringStorage>,
+    ops_channel_sender: mpsc::Sender<ChannelOp>,
 }
 
 impl ThreadLocalReader {
     fn from(css: &ConcurrentStringStorage) -> Self {
         Self {
             read_handle: css.read_handle.lock().unwrap().clone(),
+            ops_channel_sender: css.ops_channel_sender.clone(),
         }
     }
 
-    #[inline]
+    pub(crate) fn retain(&self, key: IStringKey) {
+        self.ops_channel_sender
+            .send(ChannelOp::Retain { key })
+            .expect("the receiver is available");
+    }
+
+    pub(crate) fn release(&self, istring: &mut IString) {
+        self.ops_channel_sender
+            .send(ChannelOp::Release { key: istring.key })
+            .expect("the receiver is available");
+    }
+
     pub(crate) fn read<'a>(&self, istring: &'a IString) -> &'a str {
         let iss = self.read_handle.enter().expect("reader is available");
         let stored_string = iss.map.get(&istring.key).expect("a valid IString implies that the storage has it's string contents");
@@ -116,7 +180,10 @@ impl ThreadLocalReader {
 #[derive(Clone)]
 pub(crate) struct StoredString {
     pub(crate) inner: BoxedStr,
-    strong_count: usize
+    // Note: can be negative because StringStorageOp::Retain and StringStorageOp::Release
+    // are not guaranteeded to be appended in order.
+    // When performing StringStorageOp::DropUnusedStrings, it should be >= 0 though.
+    strong_count: isize
 }
 
 impl StoredString {
@@ -287,6 +354,7 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                 // they are still being aliased by the read map's and the write map's `StoredString`s
                 for string_key in self.strings_to_possibly_free.drain(..) {
                     let stored = self.map.remove(&string_key).unwrap();
+                    debug_assert!(stored.strong_count >= 0, "after all Retain/Release operations are absorbed, it should not be negative");
                     // make sure that the string is actually unused
                     if stored.is_droppable() {
                         // remove it from the trie as well
@@ -330,6 +398,7 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             StringStorageOp::DropUnusedStrings => {
                 for string_key in self.strings_to_possibly_free.drain(..) {
                     let stored = self.map.remove(&string_key).unwrap();
+                    debug_assert!(stored.strong_count >= 0, "after all Retain/Release operations are absorbed, it should not be negative");
                     // make sure that the string is actually unused
                     if stored.is_droppable() {
                         // remove it from the trie as well

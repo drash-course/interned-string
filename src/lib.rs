@@ -5,15 +5,17 @@ mod storage;
 
 /// An immutable and interned string.
 /// 
-/// Reading an `IString`'s contents is very fast, lock free and wait free (thanks to `left_right`).
-/// Can be shared and read from any number of threads.
-/// Scales linearly with the number of reading threads.
+/// Reading an `IString`'s contents is very fast, lock-free and wait-free.
+/// It can be shared and read from any number of threads.
+/// It scales linearly with the number of reading threads.
+/// 
+/// `IString` provides `Hash` and `Eq` implementations that run in O(1),
+/// perfect for an high performance `HashMap<IString, _>`
 /// 
 /// The tradeoff is that creating a new `IString` is comparatively slower :
-/// - Creating a new `IString` with a string that is already interned is generally fast.
-///   It acquires a global lock.
-/// - Creating a new `IString` with a string that isn't already interned is much slower.
-///   It acquired a global lock and waits for all readers to finish reading.
+/// - Creating a new `IString` with a string that is already interned is fast and lock-free.
+/// - Creating a new `IString` with a string that isn't already interned is slower.
+///   It acquires a global lock and waits for all readers to finish reading.
 #[derive(Eq, PartialEq, Ord, Hash)]
 pub struct IString {
     pub(crate) key: IStringKey
@@ -22,18 +24,46 @@ pub struct IString {
 // Indispensable traits impl : From, Drop, Deref
 
 impl From<String> for IString {
+    /// Intern the given `String` by consuming it. Its allocation is reused.
+    /// 
+    /// This operation runs in O(N) where N is the `string.len()`.
+    /// If the string was already interned, this operation is lock-free.
+    /// Otherwise, a global lock is acquired.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use interned_string::IString;
+    /// 
+    /// let my_istring = IString::from("hello".to_string());
+    /// ```
     #[inline]
     fn from(string: String) -> Self {
         Self {
+            // could block
             key: SHARED_STORAGE.insert_or_retain(string)
         }
     }
 }
 
 impl From<&str> for IString {
+    /// Intern the given `&str` by cloning its contents.
+    /// 
+    /// This operation runs in O(N) where N is the `string.len()`.
+    /// If the string was already interned, this operation is lock-free.
+    /// Otherwise, a global lock is acquired.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use interned_string::IString;
+    /// 
+    /// let my_istring = IString::from("hello");
+    /// ```
     #[inline]
     fn from(string: &str) -> Self {
         Self {
+            // could block
             key: SHARED_STORAGE.insert_or_retain(String::from(string))
         }
     }
@@ -42,13 +72,31 @@ impl From<&str> for IString {
 impl Drop for IString {
     #[inline]
     fn drop(&mut self) {
-        SHARED_STORAGE.release(self)
+        THREAD_LOCAL_READER.with(|tl_reader| {
+            tl_reader.release(self);
+        });
     }
 }
 
 impl Deref for IString {
     type Target = str;
     
+    /// Returns a reference to the string's contents.
+    /// 
+    /// This operation runs in O(1) and is lock-free.
+    /// 
+    /// # Example
+    /// ```
+    /// use interned_string::Intern;
+    /// 
+    /// fn foo(string: &str) {
+    ///     println!("{string}")
+    /// }
+    /// 
+    /// let my_istring = "hello".intern();
+    /// // implicit call to Deref::deref
+    /// foo(&my_istring);
+    /// ```
     #[inline]
     fn deref(&self) -> &Self::Target {
         THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
@@ -58,10 +106,21 @@ impl Deref for IString {
 }
 
 impl AsRef<str> for IString {
+    /// Returns a reference to the string's contents.
+    /// 
+    /// This operation runs in O(1) and is lock-free.
+    /// 
+    /// # Example
+    /// ```
+    /// use interned_string::Intern;
+    /// 
+    /// let my_istring = "Hello, World!".intern();
+    /// let (hello, world) = my_istring.as_ref().split_at(5);
+    /// ```
     #[inline]
     fn as_ref(&self) -> &str {
-        THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
-            reader.read(self)
+        THREAD_LOCAL_READER.with(|tl_reader: &ThreadLocalReader| {
+            tl_reader.read(self)
         })
     }
 }
@@ -69,30 +128,41 @@ impl AsRef<str> for IString {
 // Common traits impl that can't be derived : Clone, PartialOrd, Debug, Display, Default
 
 impl Clone for IString {
+    /// Returns a copy of the `IString`.
+    /// 
+    /// This operation runs in O(1) and is lock-free.
+    #[inline]
     fn clone(&self) -> Self {
-        SHARED_STORAGE.retain(self.key);
+        THREAD_LOCAL_READER.with(|reader: &ThreadLocalReader| {
+            reader.retain(self.key)
+        });
 
         Self { key: self.key }
     }
 }
 
 impl PartialOrd for IString {
+    #[inline]
     fn lt(&self, other: &Self) -> bool {
         self.deref().lt(other.deref())
     }
 
+    #[inline]
     fn le(&self, other: &Self) -> bool {
         self.deref().le(other.deref())
     }
 
+    #[inline]
     fn gt(&self, other: &Self) -> bool {
         self.deref().gt(other.deref())
     }
 
+    #[inline]
     fn ge(&self, other: &Self) -> bool {
         self.deref().ge(other.deref())
     }
     
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.deref().partial_cmp(other.deref())
     }
@@ -114,6 +184,8 @@ impl std::fmt::Display for IString {
 }
 
 impl Default for IString {
+    /// Creates an empty `IString`.
+    #[inline]
     fn default() -> Self {
         Self::from(String::default())
     }
@@ -126,6 +198,19 @@ pub trait Intern {
 }
 
 impl Intern for String {
+    /// Intern the given `String` by consuming it. Its allocation is reused.
+    /// 
+    /// This operation runs in O(N) where N is the `string.len()`.
+    /// If the string was already interned, this operation is lock-free.
+    /// Otherwise, a global lock is acquired.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use interned_string::Intern;
+    /// 
+    /// let my_istring = "hello".to_string().intern();
+    /// ```
     #[inline]
     fn intern(self) -> IString {
         IString::from(self)
@@ -133,9 +218,38 @@ impl Intern for String {
 }
 
 impl Intern for &str {
+    /// Intern the given `&str` by cloning its contents.
+    /// 
+    /// This operation runs in O(N) where N is the `string.len()`.
+    /// If the string was already interned, this operation is lock-free.
+    /// Otherwise, a global lock is acquired.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use interned_string::Intern;
+    /// 
+    /// let my_istring = "hello".intern();
+    /// ```
     #[inline]
     fn intern(self) -> IString {
         IString::from(self)
+    }
+}
+
+// Garbage collection
+
+impl IString {
+    /// Immediately frees all the interned strings that are no longer used.
+    /// 
+    /// Call this function when you wish to immediately reduce memory usage,
+    /// at the cost of some CPU time. 
+    /// This will acquire a global lock and wait for all readers to finish reading.
+    /// It's recommended to only call this function when your program has nothing else to do.
+    /// 
+    /// Using this function is optional. Memory is always eventually freed.
+    pub fn collect_garbage_now() {
+        SHARED_STORAGE.writer.lock().unwrap().collect_garbage();
     }
 }
 
@@ -370,6 +484,7 @@ mod tests {
 
         // reset the writer for the next test
         let mut writer = SHARED_STORAGE.writer.lock().unwrap();
+        writer.drain_channel_ops();
         writer.write_handle.append(storage::StringStorageOp::DropUnusedStrings);
         writer.write_handle.publish();
         drop(writer);
