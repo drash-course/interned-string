@@ -63,8 +63,9 @@ The `IString` can be shared and read from any number of threads.
 It scales linearly with the number of reading threads.
 
 The tradeoff is that creating a new `IString` is slower.
-A radix tree (compact trie) needs to be traversed to deduplicate the new string,
-a lock needs to be acquired, and the tree needs to be updated if the string wasn't interned yet.
+A radix tree (compact trie) needs to be traversed to deduplicate the new string.
+If the string wasn't interned yet, a lock needs to be acquired, the tree needs to be updated,
+and string needs to be inserted in storage.
 While the tree walk can be done in parallel from multiple threads, the lock prevents linear 
 scaling for writes.
 
@@ -74,9 +75,6 @@ scaling for writes.
   of the each interned string.
   Currently the crate uses 2x the interned string storage space because of this (1x in storage,
   1x as a clone in the radix tree).
-
-- Free the memory of unused strings in the background / in a cold path. Currenly the memory is
-  only free'd the next time a new string is inserted in storage, which may be unexpected.
 
 ## Contributing
 
