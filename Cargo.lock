@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "interned-string"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "criterion",
  "left-right",
