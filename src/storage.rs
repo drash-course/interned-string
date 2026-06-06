@@ -315,6 +315,11 @@ impl InnerStringStorage {
     #[inline]
     fn retain(&mut self, key: IStringKey) {
         let stored_string = self.map.get_mut(&key).unwrap();
+        // Retain/Release operations can arrive out of order via the channel.
+        // If a Release already queued this key for collection, cancel that.
+        if stored_string.strong_count == 0 {
+            self.strings_to_possibly_free.retain(|k| k != &key);
+        }
         stored_string.retain();
     }
 
@@ -353,7 +358,9 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
                 // Since we are in absorb_first, we cant free() the unused `BoxedStr`s because
                 // they are still being aliased by the read map's and the write map's `StoredString`s
                 for string_key in self.strings_to_possibly_free.drain(..) {
-                    let stored = self.map.remove(&string_key).unwrap();
+                    let Some(stored) = self.map.remove(&string_key) else {
+                        continue;
+                    };
                     debug_assert!(stored.strong_count >= 0, "after all Retain/Release operations are absorbed, it should not be negative");
                     // make sure that the string is actually unused
                     if stored.is_droppable() {
@@ -397,7 +404,9 @@ impl Absorb<StringStorageOp> for InnerStringStorage {
             StringStorageOp::Release { key } => self.release(key),
             StringStorageOp::DropUnusedStrings => {
                 for string_key in self.strings_to_possibly_free.drain(..) {
-                    let stored = self.map.remove(&string_key).unwrap();
+                    let Some(stored) = self.map.remove(&string_key) else {
+                        continue;
+                    };
                     debug_assert!(stored.strong_count >= 0, "after all Retain/Release operations are absorbed, it should not be negative");
                     // make sure that the string is actually unused
                     if stored.is_droppable() {

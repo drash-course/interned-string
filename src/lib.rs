@@ -402,6 +402,22 @@ mod tests {
         });
     }
 
+    /// Regression test for https://github.com/drash-course/interned-string/issues/3
+    #[test]
+    fn out_of_order_retain_release_does_not_panic() {
+        with_exclusive_use_of_shared_storage(|| {
+            let s1 = "hello".intern();
+            drop(s1); // Release queued
+
+            // Re-intern before GC runs: Retain queued while key is still in strings_to_possibly_free
+            let s2 = "hello".intern();
+            drop(s2); // Release queued again
+
+            // Trigger drain + GC
+            let _ = "trigger_gc".intern();
+        });
+    }
+
     #[test]
     fn it_is_send() {
         fn assert_send<T: Send>() {}
