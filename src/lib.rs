@@ -1,3 +1,8 @@
+#[cfg(target_family = "wasm")]
+compile_error!(
+    "The `interned-string` crate cannot run on WebAssembly due to needing multiple threads."
+);
+
 use std::{fmt::Debug, ops::Deref};
 use storage::{IStringKey, ThreadLocalReader, SHARED_STORAGE, THREAD_LOCAL_READER};
 
