@@ -8,7 +8,7 @@ use std::{
 use left_right::{Absorb, ReadHandle, WriteHandle};
 use once_cell::sync::Lazy;
 use radix_trie::{Trie, TrieKey};
-use lockfree::channel::{mpsc, RecvErr};
+use lock_freedom::channel::{mpsc, RecvErr};
 
 use crate::IString;
 
